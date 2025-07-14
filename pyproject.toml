@@ -1,0 +1,13 @@
+[project]
+name = "prodigy-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "prodigy",
+    "numpy<2.0.0"
+]
+
+[tool.uv]
+find-links = ["https://D05A-790C-D72F-0691@download.prodi.gy"]
