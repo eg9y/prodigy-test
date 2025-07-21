@@ -39,9 +39,85 @@ This exports your annotations to `goalkeeper_annotations.jsonl`
 3. **Variety**: Include different game scenarios, lighting conditions, and camera angles
 4. **Balance**: Try to get roughly equal numbers of goalkeeper vs non-goalkeeper examples
 
-## Next Steps
+## Training the Model
 
-After annotation, you can:
-1. Train a classification model using the exported data
-2. Integrate the model into your app for real-time detection
-3. Use the model to automatically detect goalkeeper periods in new videos
+### Step 3: Train Model
+After annotating and exporting data:
+```bash
+python train_model.py
+```
+
+Options:
+- `--batch-size 16`: Adjust batch size
+- `--epochs 20`: Number of training epochs
+- `--evaluate`: Run evaluation after training
+- `--pretrained`: Use transfer learning
+
+Example with custom settings:
+```bash
+python train_model.py --batch-size 8 --epochs 30 --evaluate
+```
+
+## Running Inference
+
+### Single Image Prediction
+```bash
+python inference.py path/to/image.jpg
+```
+
+### Batch Prediction
+```bash
+python inference.py data/screenshots/ --output predictions.jsonl
+```
+
+### Live Classification Interface
+```bash
+python inference.py --live --port 8080
+```
+
+Options:
+- `--no-preprocess`: Skip image preprocessing
+- `--model models/goalkeeper_model`: Specify model path
+- `--analyze`: Show prediction statistics
+
+## Model Evaluation
+
+### Basic Evaluation
+```bash
+python evaluate_model.py
+```
+
+### Cross-Validation
+```bash
+python evaluate_model.py --cross-validate --folds 5
+```
+
+### Error Analysis
+```bash
+python evaluate_model.py --analyze-errors
+```
+
+### Full Performance Report
+```bash
+python evaluate_model.py --report
+```
+
+## Complete Workflow Example
+
+1. **Prepare data**: Place screenshots in `data/screenshots/`
+2. **Annotate**: `python goalkeeper_annotation.py`
+3. **Export**: `python goalkeeper_annotation.py export`
+4. **Train**: `python train_model.py --evaluate`
+5. **Predict**: `python inference.py data/new_screenshots/`
+6. **Evaluate**: `python evaluate_model.py --report`
+
+## Image Preprocessing
+
+The scripts automatically crop the bottom center of images where the goalkeeper UI typically appears. To skip preprocessing:
+- Annotation: `python goalkeeper_annotation.py no-preprocess`
+- Inference: `python inference.py image.jpg --no-preprocess`
+
+Custom crop ratios:
+```bash
+python goalkeeper_annotation.py 0.3 0.5  # height_ratio width_ratio
+```

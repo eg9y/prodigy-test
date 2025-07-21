@@ -1,3 +1,6 @@
+data/screenshots
+data/screenshots_cropped
+
 # Python
 __pycache__/
 *.py[cod]
