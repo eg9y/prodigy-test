@@ -1,258 +1,270 @@
 #!/usr/bin/env python3
 """
-Training script for goalkeeper detection model using YOLOv8
+Goalkeeper detection model training script using YOLO11 classification.
+Converts Prodigy annotations to YOLO format and trains a classification model.
 """
 
 import json
-import subprocess
+import os
+import base64
 import shutil
-import yaml
+from io import BytesIO
 from pathlib import Path
-from ultralytics import YOLO
-from sklearn.model_selection import train_test_split
+from typing import List, Dict, Any
+
+import numpy as np
 from PIL import Image
-import warnings
-warnings.filterwarnings('ignore')
+from ultralytics import YOLO
+from image_preprocessor import crop_bottom_center
 
-def load_prodigy_data(dataset_name="goalkeeper_detection"):
-    """Load annotated data from Prodigy database"""
-    print(f"Loading data from Prodigy dataset: {dataset_name}")
-    
-    # Export data from Prodigy
-    cmd = ["uv", "run", "python", "-m", "prodigy", "db-out", dataset_name, "-"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to export data from Prodigy: {result.stderr}")
-    
-    # Parse JSONL data
-    examples = []
-    for line in result.stdout.strip().split('\n'):
-        if line:
-            example = json.loads(line)
-            if example.get('answer') == 'accept':
-                examples.append(example)
-    
-    print(f"Loaded {len(examples)} annotated examples")
-    return examples
 
-def prepare_yolo_dataset(examples, output_dir="yolo_dataset", eval_split=0.2):
-    """Convert Prodigy annotations to YOLO format for classification"""
-    
-    # Clean up existing dataset
-    output_path = Path(output_dir)
-    if output_path.exists():
-        shutil.rmtree(output_path)
-    
-    # Create directory structure for YOLO classification
-    train_dir = output_path / "train"
-    val_dir = output_path / "val"
-    
+def load_annotation_data(jsonl_path: str) -> List[Dict[str, Any]]:
+    """Load annotated data from JSONL file."""
+    annotations = []
+
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            if line.strip():
+                try:
+                    data = json.loads(line)
+                    annotations.append(data)
+                except json.JSONDecodeError as e:
+                    print(f"Skipping invalid JSON line: {e}")
+                    continue
+
+    print(f"Loaded {len(annotations)} annotations from {jsonl_path}")
+    return annotations
+
+
+def decode_base64_image(base64_string: str) -> Image.Image:
+    """Convert base64 encoded image to PIL Image."""
+    # Remove data URL prefix if present
+    if base64_string.startswith('data:image/'):
+        base64_string = base64_string.split(',')[1]
+
+    # Decode base64 to bytes
+    image_bytes = base64.b64decode(base64_string)
+
+    # Convert to PIL Image
+    image = Image.open(BytesIO(image_bytes))
+
+    # Convert to RGB if not already
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+
+    return image
+
+
+def create_yolo_dataset(annotations: List[Dict[str, Any]], dataset_path: str = "dataset"):
+    """Create YOLO-format dataset from Prodigy annotations."""
+    # Create dataset directory structure
+    train_dir = Path(dataset_path) / "train"
+    val_dir = Path(dataset_path) / "val"
+
     # Create class directories
-    (train_dir / "goalkeeper").mkdir(parents=True, exist_ok=True)
-    (train_dir / "not_goalkeeper").mkdir(parents=True, exist_ok=True)
-    (val_dir / "goalkeeper").mkdir(parents=True, exist_ok=True)
-    (val_dir / "not_goalkeeper").mkdir(parents=True, exist_ok=True)
-    
-    # Split data
-    train_examples, val_examples = train_test_split(
-        examples, test_size=eval_split, random_state=42, shuffle=True
-    )
-    
-    print(f"Preparing YOLO dataset...")
-    print(f"Training examples: {len(train_examples)}")
-    print(f"Validation examples: {len(val_examples)}")
-    
-    # Copy images to appropriate directories
-    def copy_examples(examples, split_dir):
-        goalkeeper_count = 0
-        not_goalkeeper_count = 0
-        
-        for idx, example in enumerate(examples):
-            if 'path' in example:
-                src_path = Path(example['path'])
-                if src_path.exists():
-                    # Determine class based on annotation
-                    if 'goalkeeper' in example.get('accept', []):
-                        class_name = "goalkeeper"
-                        goalkeeper_count += 1
-                    else:
-                        class_name = "not_goalkeeper"
-                        not_goalkeeper_count += 1
-                    
-                    # Copy image to appropriate class directory
-                    dst_path = split_dir / class_name / f"{class_name}_{idx}_{src_path.name}"
-                    shutil.copy2(src_path, dst_path)
-        
-        return goalkeeper_count, not_goalkeeper_count
-    
-    # Process training data
-    train_gk, train_not_gk = copy_examples(train_examples, train_dir)
-    val_gk, val_not_gk = copy_examples(val_examples, val_dir)
-    
-    print(f"\nDataset prepared:")
-    print(f"Training: {train_gk} goalkeeper, {train_not_gk} not_goalkeeper")
-    print(f"Validation: {val_gk} goalkeeper, {val_not_gk} not_goalkeeper")
-    
-    # Create dataset.yaml for YOLO
-    dataset_config = {
-        'path': str(output_path.absolute()),
-        'train': 'train',
-        'val': 'val',
-        'nc': 2,  # Number of classes
-        'names': ['goalkeeper', 'not_goalkeeper']
-    }
-    
-    with open(output_path / 'dataset.yaml', 'w') as f:
-        yaml.dump(dataset_config, f)
-    
-    return output_path
+    for split_dir in [train_dir, val_dir]:
+        (split_dir / "goalkeeper").mkdir(parents=True, exist_ok=True)
+        (split_dir / "not_goalkeeper").mkdir(parents=True, exist_ok=True)
 
-def train_yolo_model(
-    dataset_name="goalkeeper_detection",
-    output_dir="models",
-    model_name="goalkeeper_yolo",
-    model_size="n",  # nano model for fast training
-    epochs=50,
-    imgsz=640,
-    batch_size=16,
-    eval_split=0.2
-):
-    """Train YOLOv8 classification model"""
-    
-    # Load and prepare data
-    examples = load_prodigy_data(dataset_name)
-    
-    if len(examples) < 10:
-        print("Error: Not enough annotated examples. Please annotate more images.")
-        return
-    
-    # Prepare YOLO dataset
-    dataset_path = prepare_yolo_dataset(examples, eval_split=eval_split)
-    
-    # Initialize YOLO model for classification
-    model = YOLO(f'yolov8{model_size}-cls.pt')  # Use classification model
-    
-    # Create output directory
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
-    
-    print(f"\nStarting YOLOv8 training...")
-    print(f"Model: yolov8{model_size}-cls")
-    print(f"Epochs: {epochs}")
-    print(f"Image size: {imgsz}")
-    print(f"Batch size: {batch_size}")
-    
+    # Process annotations
+    goalkeeper_count = 0
+    not_goalkeeper_count = 0
+
+    for i, annotation in enumerate(annotations):
+        try:
+            # Extract image data and answer (Prodigy format)
+            image_data = annotation.get('image', '')
+            answer = annotation.get('answer', '')
+
+            if not image_data:
+                print(f"Skipping annotation {i}: missing image data")
+                continue
+
+            if answer not in ['accept', 'reject']:
+                print(f"Skipping annotation {i}: missing or invalid answer field (got: {answer})")
+                continue
+
+            # Convert Prodigy answer to our label format
+            label = 'goalkeeper' if answer == 'accept' else 'not_goalkeeper'
+
+            # Decode image
+            image = decode_base64_image(image_data)
+
+            # Count labels for balanced split
+            if label == 'goalkeeper':
+                goalkeeper_count += 1
+            else:
+                not_goalkeeper_count += 1
+
+            # Split into train/val (80/20 split, balanced by class)
+            if label == 'goalkeeper':
+                use_val = (goalkeeper_count % 5 == 0)  # Every 5th goalkeeper image goes to val
+            else:
+                use_val = (not_goalkeeper_count % 5 == 0)  # Every 5th non-goalkeeper image goes to val
+
+            split_dir = val_dir if use_val else train_dir
+
+            # Save image
+            filename = f"{label}_{i:04d}.jpg"
+            image_path = split_dir / label / filename
+            image.save(image_path, "JPEG", quality=95)
+
+        except Exception as e:
+            print(f"Error processing annotation {i}: {e}")
+            continue
+
+    # Print dataset statistics
+    train_gk = len(list((train_dir / "goalkeeper").glob("*.jpg")))
+    train_ngk = len(list((train_dir / "not_goalkeeper").glob("*.jpg")))
+    val_gk = len(list((val_dir / "goalkeeper").glob("*.jpg")))
+    val_ngk = len(list((val_dir / "not_goalkeeper").glob("*.jpg")))
+
+    print(f"\nDataset created at {dataset_path}")
+    print(f"Training set: {train_gk} goalkeeper, {train_ngk} not_goalkeeper")
+    print(f"Validation set: {val_gk} goalkeeper, {val_ngk} not_goalkeeper")
+    print(f"Total: {train_gk + val_gk} goalkeeper, {train_ngk + val_ngk} not_goalkeeper")
+
+    return dataset_path
+
+
+def create_dataset_yaml(dataset_path: str):
+    """Create dataset.yaml configuration file for YOLO."""
+    yaml_content = f"""# Goalkeeper Detection Dataset
+path: {os.path.abspath(dataset_path)}
+train: train
+val: val
+
+# Class names
+names:
+  0: not_goalkeeper
+  1: goalkeeper
+
+# Number of classes
+nc: 2
+"""
+
+    yaml_path = Path(dataset_path) / "dataset.yaml"
+    with open(yaml_path, 'w') as f:
+        f.write(yaml_content)
+
+    print(f"Dataset configuration saved to {yaml_path}")
+    return str(yaml_path)
+
+
+def train_yolo_model(dataset_path: str, model_size: str = "n", epochs: int = 20, imgsz: int = 224):
+    """Train YOLO11 classification model."""
+    # Load pretrained model
+    model_name = f"yolo11{model_size}-cls.pt"
+    print(f"Loading model: {model_name}")
+    model = YOLO(model_name)
+
     # Train the model
+    print(f"Starting training for {epochs} epochs...")
     results = model.train(
-        data=str(dataset_path / 'dataset.yaml'),
+        data=dataset_path,  # Pass the dataset directory, not the yaml file
         epochs=epochs,
         imgsz=imgsz,
-        batch=batch_size,
-        name=model_name,
-        project=str(output_path),
-        exist_ok=True,
-        patience=10,
+        batch=16,  # Adjust based on your GPU memory
+        patience=20,  # Early stopping patience
         save=True,
-        device='cpu',  # Use CPU for compatibility
-        pretrained=True,
-        verbose=True
+        device='cpu',  # Change to 'cuda' if you have GPU
+        workers=4,
+        project="goalkeeper_training",
+        name="goalkeeper_model"
     )
-    
-    # Save the best model
-    best_model_path = output_path / model_name / 'weights' / 'best.pt'
-    final_model_path = output_path / f"{model_name}.pt"
-    
-    if best_model_path.exists():
-        shutil.copy2(best_model_path, final_model_path)
-        print(f"\nModel saved to: {final_model_path}")
-        
-        # Save training info
-        info_file = output_path / f"{model_name}_info.json"
-        training_info = {
-            "dataset": dataset_name,
-            "model_path": str(final_model_path),
-            "model_size": model_size,
-            "epochs": epochs,
-            "imgsz": imgsz,
-            "batch_size": batch_size,
-            "eval_split": eval_split,
-            "class_names": ['goalkeeper', 'not_goalkeeper']
-        }
-        
-        with open(info_file, 'w') as f:
-            json.dump(training_info, f, indent=2)
-        
-        print(f"Training info saved to: {info_file}")
-        
-        # Print metrics
-        if hasattr(results, 'results_dict'):
-            metrics = results.results_dict
-            print(f"\nTraining Metrics:")
-            print(f"Top-1 Accuracy: {metrics.get('metrics/accuracy_top1', 'N/A'):.4f}")
-            print(f"Top-5 Accuracy: {metrics.get('metrics/accuracy_top5', 'N/A'):.4f}")
 
-def evaluate_model(model_path, test_images_dir):
-    """Evaluate the trained YOLO model"""
-    
-    model = YOLO(model_path)
-    
-    print(f"\nEvaluating model on test images...")
-    
-    # Run inference on test images
-    results = model(test_images_dir, stream=True)
-    
-    for result in results:
-        print(f"\nImage: {result.path}")
-        probs = result.probs
-        if probs is not None:
-            class_names = ['goalkeeper', 'not_goalkeeper']
-            top1_idx = probs.top1
-            top1_conf = probs.top1conf
-            print(f"Prediction: {class_names[top1_idx]} (confidence: {top1_conf:.4f})")
+    return model, results
+
+
+def evaluate_model(model, dataset_path: str):
+    """Evaluate the trained model."""
+    print("Evaluating model...")
+    metrics = model.val(data=dataset_path)
+
+    print(f"Top-1 Accuracy: {metrics.top1:.3f}")
+    print(f"Top-5 Accuracy: {metrics.top5:.3f}")
+
+    return metrics
+
+
+def save_model_for_inference(model, output_path: str = "models/goalkeeper_model.pt"):
+    """Save the trained model for inference."""
+    os.makedirs("models", exist_ok=True)
+
+    # Copy the best model weights
+    best_model_path = model.trainer.best
+    shutil.copy2(best_model_path, output_path)
+
+    print(f"Model saved to {output_path}")
+    print(f"To use for inference: model = YOLO('{output_path}')")
+
 
 def main():
-    """Main training function"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Train goalkeeper detection model using YOLOv8")
-    parser.add_argument("--dataset", default="goalkeeper_detection", help="Prodigy dataset name")
-    parser.add_argument("--output-dir", default="models", help="Output directory for models")
-    parser.add_argument("--model-name", default="goalkeeper_yolo", help="Model name")
-    parser.add_argument("--model-size", default="n", choices=['n', 's', 'm', 'l', 'x'], 
-                        help="YOLOv8 model size (n=nano, s=small, m=medium, l=large, x=xlarge)")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
-    parser.add_argument("--imgsz", type=int, default=640, help="Image size")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
-    parser.add_argument("--eval-split", type=float, default=0.2, help="Validation split")
-    parser.add_argument("--evaluate", action="store_true", help="Evaluate after training")
-    parser.add_argument("--test-dir", help="Directory with test images for evaluation")
-    
-    args = parser.parse_args()
-    
+    """Main training function."""
+    # Configuration
+    MODEL_SIZE = "n"  # Options: n, s, m, l, x (larger = more accurate but slower)
+    EPOCHS = 20       # Reduce if overfitting, increase for better accuracy
+    IMAGE_SIZE = 224  # Standard size for classification
+
+    # Find annotation file
+    annotation_files = [
+        "goalkeeper_detection.jsonl",
+        "-/goalkeeper_detection.jsonl",
+        "goalkeeper_annotations.jsonl/goalkeeper_detection.jsonl"
+    ]
+
+    annotation_path = None
+    for file_path in annotation_files:
+        if os.path.exists(file_path):
+            annotation_path = file_path
+            break
+
+    if annotation_path is None:
+        print("Error: Could not find annotation file!")
+        print("Expected files:", annotation_files)
+        return
+
+    print(f"Using annotation file: {annotation_path}")
+
     try:
-        train_yolo_model(
-            dataset_name=args.dataset,
-            output_dir=args.output_dir,
-            model_name=args.model_name,
-            model_size=args.model_size,
-            epochs=args.epochs,
-            imgsz=args.imgsz,
-            batch_size=args.batch_size,
-            eval_split=args.eval_split
+        # Load annotations
+        annotations = load_annotation_data(annotation_path)
+
+        if len(annotations) < 10:
+            print("Warning: Very few annotations found. Consider annotating more data for better results.")
+
+        # Create YOLO dataset
+        dataset_path = create_yolo_dataset(annotations)
+        dataset_yaml = create_dataset_yaml(dataset_path)
+
+        # Train model
+        model, results = train_yolo_model(
+            dataset_path,  # Pass dataset path instead of yaml
+            model_size=MODEL_SIZE,
+            epochs=EPOCHS,
+            imgsz=IMAGE_SIZE
         )
-        
-        if args.evaluate and args.test_dir:
-            model_path = Path(args.output_dir) / f"{args.model_name}.pt"
-            if model_path.exists():
-                evaluate_model(str(model_path), args.test_dir)
-            
+
+        # Evaluate model
+        metrics = evaluate_model(model, dataset_path)
+
+        # Save model for inference
+        save_model_for_inference(model)
+
+        print("\n" + "="*50)
+        print("TRAINING COMPLETED SUCCESSFULLY!")
+        print("="*50)
+        print(f"Model accuracy: {metrics.top1:.1%}")
+        print("Model saved to: models/goalkeeper_model.pt")
+        print("\nTo use the trained model:")
+        print("from ultralytics import YOLO")
+        print("model = YOLO('models/goalkeeper_model.pt')")
+        print("results = model('path/to/your/image.jpg')")
+
     except Exception as e:
-        print(f"Error: {e}")
-        print("\nTroubleshooting:")
-        print("1. Make sure you have annotated data (run annotation first)")
-        print("2. Check that ultralytics is installed: uv sync")
-        print("3. Ensure image paths are accessible")
+        print(f"Training failed: {e}")
+        raise
+
 
 if __name__ == "__main__":
     main()

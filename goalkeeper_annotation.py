@@ -14,10 +14,8 @@ from image_preprocessor import preprocess_directory, cleanup_preprocessed
 
 def get_prodigy_command():
     """Get the appropriate command to run Prodigy"""
-    # Try different ways to run Prodigy
-    if os.path.exists("run_prodigy.py"):
-        return [sys.executable, "run_prodigy.py"]
-    elif os.system("uv --version > /dev/null 2>&1") == 0:
+    # Use uv run if available, otherwise fall back to direct python
+    if os.system("uv --version > /dev/null 2>&1") == 0:
         return ["uv", "run", "python", "-m", "prodigy"]
     else:
         return [sys.executable, "-m", "prodigy"]
