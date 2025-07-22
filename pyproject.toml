@@ -10,7 +10,10 @@ dependencies = [
     "pillow",
     "ultralytics>=8.0.0",
     "scikit-learn>=1.3.0",
-    "pyyaml>=6.0"
+    "pyyaml>=6.0",
+    "onnx>=1.18.0",
+    "onnxruntime>=1.22.1",
+    "onnxslim>=0.1.60",
 ]
 
 [tool.uv]
